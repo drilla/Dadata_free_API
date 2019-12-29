@@ -1,7 +1,7 @@
 defmodule AddressProcessor do
   @moduledoc """
     Processing addresses with undefinded fias codes
-    uses dadata api
+    uses dadata SUGGESTIONS api
   """
 
   alias AddressProcessor.AddressProvider.Api, as: AddressApi
@@ -17,88 +17,63 @@ defmodule AddressProcessor do
     count = AddressApi.count_without_fias_data()
     Logger.info("Starting determine fias data for #{count}")
 
-    # take free address from stream and start loop, while has new addresses
-
-    process_address_loop(AddressApi.get_address_without_code(), 0 , count)
-
+    # cannot stream db without transaction
+    Repo.transaction(fn() ->
+       unprocessed_data = 
+       AddressApi.get_unprocessed()
+       |> Enum.reduce(0, fn (address, acc) ->
+         rows_updated =try_update(address)
+         Logger.info("Rows updated in table: #{acc + 1} from #{count}")
+         Logger.info("Processed: #{acc + 1} from #{count}")
+         acc + 1
+       end)
+    end)
+ 
     Logger.info("Finished")
 
     {:ok}
-
-    # save data
   end
 
-  @doc """
-    excluded_ids - accumulating list of ids, which cannot be correctrly processed, due to a missing dada in dadata api
-    therefore, we shouldnt ask it from api
-  """
-  @spec process_address_loop(%Address{}, integer, integer) :: nil  
-
-  defp process_address_loop(address, updated_total_count, total_count)
-
-  defp process_address_loop(nil, _, _), do: nil
-
-  defp process_address_loop(%Address{address: address_text} = address, updated_total_count, total_count) do
-    
+  @spec try_update(%Address{}) :: integer  
+  defp try_update(%Address{address: address_text} = address) do
     rows_updated = 
       DadataApi.determine_fias_data(address_text)
-      |> process_api_result(address)
-
-    updated_total_count = updated_total_count + rows_updated
-    Logger.info("Updated: #{updated_total_count} from #{total_count}")
-
-    #takes next and so on ...
-    process_address_loop(AddressApi.get_address_without_code(), updated_total_count, total_count)
+      |> log_api_result(address)
+      |> update(address)
   end
   
-  defp process_api_result({:error, "No suggestions available"}, %Address{id: id, address: text} = address) do
-    #no suggestions- no actions
 
-    # update table, mark not found
-   AddressApi.mark_as_not_found(address)
-   Logger.info(" #{String.slice(text, 0, 15)} marked as NOT FOUND")
-
-    0
+  defp log_api_result({:ok, %ApiResult{suggestion_count: suggestion_count}} = result, _address) when suggestion_count > 1 do
+    Logger.warn("There are more than one suggestion (#{suggestion_count}), returned from dadata service. The first will be used")
+    result
   end
 
-  defp process_api_result({:ok, %ApiResult{
+  defp log_api_result({:ok, %ApiResult{fias_code: nil}} = result, %Address{address: text} = address) do
+    Logger.info(" #{String.slice(text, 0, 50)} marked as NOT FOUND")
+    result
+  end
+ 
+  defp log_api_result({:ok, %ApiResult{
     suggestion_count: suggestion_count,
-    object:           %ApiObjectData{fias_code: fias_code, fias_id: _fias_id} = object 
-  }}, %Address{id: id, address: address_text} = address) do
-
-    cond do
-      suggestion_count > 1 -> Logger.warn("There are more than one suggestion (#{suggestion_count}), returned from dadata service. The first will be used")
-      true                 -> nil
-    end
-    Logger.info("Fias code and id determined for #{address_text}")
-    
-    rows_updated = update_addresses(object, address)
-
-    # if object has ho valid fias code, skip it
-    cond do
-      fias_code === nil ->
-        AddressApi.mark_as_not_found(address)
-        Logger.info(" #{String.slice(address_text, 0, 15)} marked as NOT FOUND")
-        true -> nil
-    end
-
-    rows_updated
-  end
-
-  defp process_api_result({:error, reason}, %Address{address: address_text}) do
-    Logger.warn("Api result for #{address_text}: "<> reason)
+    fias_code:        fias_code,
+    fias_id:          fias_id 
+  }} = result, %Address{address: address_text}) do
+    Logger.info("Fias code determined (#{fias_code}) for #{address_text}")
+    result
+  end 
+  
+  defp update({:ok, %ApiResult{fias_code: nil}}, address) do
+    AddressApi.mark_as_not_found(address)
     0
   end
 
-  defp update_addresses( %ApiObjectData{fias_code: fias_code, fias_id: fias_id}, %Address{} = address) do
-   
-    {updated_count, nil} = AddressApi.update_same_addresses(address, fias_code, fias_id)
-    case updated_count do
-      0     -> nil 
-      count -> Logger.info("Updated #{count} addresses")
-    end
-    updated_count
+  defp update({:error, _reason}, %Address{} = address) do
+    AddressApi.mark_as_not_found(address)
+    0
   end
-
-  defp update_addresses(_, _), do: 0
+  
+  defp update({:ok, %ApiResult{fias_code: fias_code, fias_id: fias_id}}, address) do
+   {rows_updated , nil} =  AddressApi.update_same_addresses(%Address{address: address}, fias_code, fias_id)
+   rows_updated
+  end
 end

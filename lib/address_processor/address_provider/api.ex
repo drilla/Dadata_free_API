@@ -13,12 +13,17 @@ defmodule AddressProcessor.AddressProvider.Api do
   def get_address_without_code() do
     Address
     |> where_no_fias_codes()
-#    |> where([a], a.id not in ^excluded_ids)
     |> where([a], a.not_found != true or is_nil(a.not_found))
-
-    
     |> first()
     |> Repo.one()
+  end
+
+  @spec get_unprocessed() :: Stream.t
+  def get_unprocessed() do
+    Address
+    |> where_no_fias_codes()
+    |> where([a], a.not_found != true or is_nil(a.not_found))
+    |> Repo.stream()
   end
 
   @doc "updates all  entities with given address at once"
@@ -28,6 +33,14 @@ defmodule AddressProcessor.AddressProvider.Api do
       where: a.address == ^address
     Repo.update_all(query,  set: [fias_id: fias_id, fias_code: fias_code])
   end
+
+  def update_same_addresses(%Address{address: address}, fias_code) do
+    query = 
+      from a in Address,
+      where: a.address == ^address
+    Repo.update_all(query,  set: [fias_code: fias_code])
+  end
+
 
   @doc "mark one addres not found in api"
   def mark_as_not_found(%Address{id: _id} = address) do

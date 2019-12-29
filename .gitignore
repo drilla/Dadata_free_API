@@ -23,5 +23,4 @@ erl_crash.dump
 address_processor-*.tar
 
 /config/*.secret.exs
-prod.secret.exs
 
